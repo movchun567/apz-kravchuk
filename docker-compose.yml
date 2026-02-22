@@ -1,0 +1,21 @@
+services:
+  logging-service:
+    build: ./logging_service
+    ports:
+      - "8001:8001"
+
+  counter-service:
+    build: ./counter_service
+    ports:
+      - "8002:8002"
+
+  facade-service:
+    build: ./facade_service
+    ports:
+      - "8000:8000"
+    environment:
+      - LOGGING_URL=http://logging-service:8001
+      - COUNTER_URL=http://counter-service:8002
+    depends_on:
+      - logging-service
+      - counter-service
