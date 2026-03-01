@@ -1,0 +1,12 @@
+<hazelcast xmlns="http://www.hazelcast.com/schema/config"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="http://www.hazelcast.com/schema/config
+                               http://www.hazelcast.com/schema/config/hazelcast-config-5.3.xsd">
+
+  <cluster-name>hw2</cluster-name>
+
+  <queue name="bounded-q">
+    <max-size>10</max-size>
+  </queue>
+
+</hazelcast>
