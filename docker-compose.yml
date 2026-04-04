@@ -1,21 +1,94 @@
 services:
-  logging-service:
+  hazelcast1:
+    image: hazelcast/hazelcast:5.3
+    volumes:
+      - ./hazelcast-docker.xml:/opt/hazelcast/config/hazelcast-docker.xml:ro
+    environment:
+      - HZ_CLUSTERNAME=dev
+
+  hazelcast2:
+    image: hazelcast/hazelcast:5.3
+    volumes:
+      - ./hazelcast-docker.xml:/opt/hazelcast/config/hazelcast-docker.xml:ro
+    environment:
+      - HZ_CLUSTERNAME=dev
+
+  hazelcast3:
+    image: hazelcast/hazelcast:5.3
+    volumes:
+      - ./hazelcast-docker.xml:/opt/hazelcast/config/hazelcast-docker.xml:ro
+    environment:
+      - HZ_CLUSTERNAME=dev
+
+  logging-service-1:
     build: ./logging_service
     ports:
       - "8001:8001"
+    environment:
+      - LOGGING_INSTANCE_ID=1
+      - HZ_CLUSTER_NAME=dev
+      - HZ_MEMBERS=hazelcast1:5701,hazelcast2:5701,hazelcast3:5701
+    depends_on:
+      - hazelcast1
+      - hazelcast2
+      - hazelcast3
+
+  logging-service-2:
+    build: ./logging_service
+    ports:
+      - "8003:8001"
+    environment:
+      - LOGGING_INSTANCE_ID=2
+      - HZ_CLUSTER_NAME=dev
+      - HZ_MEMBERS=hazelcast1:5701,hazelcast2:5701,hazelcast3:5701
+    depends_on:
+      - hazelcast1
+      - hazelcast2
+      - hazelcast3
+
+  logging-service-3:
+    build: ./logging_service
+    ports:
+      - "8004:8001"
+    environment:
+      - LOGGING_INSTANCE_ID=3
+      - HZ_CLUSTER_NAME=dev
+      - HZ_MEMBERS=hazelcast1:5701,hazelcast2:5701,hazelcast3:5701
+    depends_on:
+      - hazelcast1
+      - hazelcast2
+      - hazelcast3
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=counter
+      - POSTGRES_USER=counter
+      - POSTGRES_PASSWORD=counter
+    volumes:
+      - pgdata:/var/lib/postgresql/data
 
   counter-service:
     build: ./counter_service
     ports:
       - "8002:8002"
+    environment:
+      - DATABASE_URL=postgresql://counter:counter@postgres:5432/counter
+    depends_on:
+      - postgres
 
   facade-service:
     build: ./facade_service
     ports:
       - "8000:8000"
     environment:
-      - LOGGING_URL=http://logging-service:8001
+      - LOGGING_URLS=http://logging-service-1:8001,http://logging-service-2:8001,http://logging-service-3:8001
       - COUNTER_URL=http://counter-service:8002
     depends_on:
-      - logging-service
+      - logging-service-1
+      - logging-service-2
+      - logging-service-3
       - counter-service
+
+volumes:
+  pgdata:

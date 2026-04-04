@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 
 EXPOSE 8002
-CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:8002", "app:app"]
+CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:8002", "app:app"]

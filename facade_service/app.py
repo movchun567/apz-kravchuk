@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import random
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 
@@ -10,9 +11,15 @@ from flask import Flask, request, jsonify
 app = Flask(__name__)
 
 LOGGING_URL = os.getenv("LOGGING_URL", "http://logging-service:8001")
+LOGGING_URLS = [
+    u.strip()
+    for u in os.getenv("LOGGING_URLS", "").split(",")
+    if u.strip()
+]
+if not LOGGING_URLS:
+    LOGGING_URLS = [LOGGING_URL]
 COUNTER_URL = os.getenv("COUNTER_URL", "http://counter-service:8002")
 
-# metrics
 metrics = {
     "logging_calls": 0,
     "counter_calls": 0,
@@ -21,14 +28,33 @@ metrics = {
 }
 m_lock = Lock()
 
-# parallel computing to make it faster
 pool = ThreadPoolExecutor(max_workers=16)
 
-def timed_request(method: str, url: str, **kwargs):
+def timed_request(method, url, **kwargs):
     t0 = time.perf_counter()
     r = requests.request(method, url, timeout=10, **kwargs)
     dt = time.perf_counter() - t0
     return r, dt
+
+def timed_request_failover(method, base_urls, path, **kwargs):
+    if not base_urls:
+        raise ValueError("base_urls is empty")
+
+    start = random.randrange(len(base_urls))
+    ordered = base_urls[start:] + base_urls[:start]
+
+    last_exc = None
+    total_dt = 0.0
+    for base in ordered:
+        try:
+            r, dt = timed_request(method, f"{base}{path}", **kwargs)
+            total_dt += dt
+            return r, total_dt
+        except requests.RequestException as e:
+            last_exc = e
+            continue
+
+    raise last_exc or RuntimeError("all logging-service instances unreachable")
 
 @app.post("/transaction")
 def post_transaction():
@@ -36,7 +62,7 @@ def post_transaction():
     if "user_id" not in body or "amount" not in body:
         return jsonify({"error": "required fields: user_id, amount"}), 400
 
-    tx_id = str(uuid.uuid4())
+    tx_id = body.get("transaction_id") or str(uuid.uuid4())
     ts = time.time()
 
     payload = {
@@ -45,12 +71,21 @@ def post_transaction():
         "user_id": body["user_id"],
         "amount": int(body["amount"]),
     }
+    if "message" in body:
+        payload["message"] = body["message"]
 
-    f_log = pool.submit(timed_request, "POST", f"{LOGGING_URL}/transactions", json=payload)
+    f_log = pool.submit(timed_request_failover, "POST", LOGGING_URLS, "/transactions", json=payload)
     f_cnt = pool.submit(timed_request, "POST", f"{COUNTER_URL}/transactions", json=payload)
 
-    log_resp, log_dt = f_log.result()
-    cnt_resp, cnt_dt = f_cnt.result()
+    try:
+        log_resp, log_dt = f_log.result()
+    except Exception as e:
+        return jsonify({"error": "logging-service unreachable", "details": str(e)}), 502
+
+    try:
+        cnt_resp, cnt_dt = f_cnt.result()
+    except Exception as e:
+        return jsonify({"error": "counter-service unreachable", "details": str(e)}), 502
 
     if log_resp.status_code >= 400:
         return jsonify({"error": "logging-service error", "details": log_resp.text}), 502
@@ -67,12 +102,19 @@ def post_transaction():
     return jsonify({"transaction_id": tx_id, "balance": balance})
 
 @app.get("/user/<user_id>")
-def get_user(user_id: str):
+def get_user(user_id):
     f_bal = pool.submit(timed_request, "GET", f"{COUNTER_URL}/balance/user/{user_id}")
-    f_txs = pool.submit(timed_request, "GET", f"{LOGGING_URL}/transactions/user/{user_id}")
+    f_txs = pool.submit(timed_request_failover, "GET", LOGGING_URLS, f"/transactions/user/{user_id}")
 
-    bal_resp, bal_dt = f_bal.result()
-    txs_resp, txs_dt = f_txs.result()
+    try:
+        bal_resp, bal_dt = f_bal.result()
+    except Exception as e:
+        return jsonify({"error": "counter-service unreachable", "details": str(e)}), 502
+
+    try:
+        txs_resp, txs_dt = f_txs.result()
+    except Exception as e:
+        return jsonify({"error": "logging-service unreachable", "details": str(e)}), 502
 
     if bal_resp.status_code >= 400:
         return jsonify({"error": "counter-service error", "details": bal_resp.text}), 502
@@ -92,7 +134,10 @@ def get_user(user_id: str):
 
 @app.get("/accounts")
 def get_accounts():
-    resp, dt = timed_request("GET", f"{COUNTER_URL}/balances")
+    try:
+        resp, dt = timed_request("GET", f"{COUNTER_URL}/balances")
+    except Exception as e:
+        return jsonify({"error": "counter-service unreachable", "details": str(e)}), 502
     if resp.status_code >= 400:
         return jsonify({"error": "counter-service error", "details": resp.text}), 502
 
