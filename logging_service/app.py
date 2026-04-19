@@ -4,6 +4,7 @@ import time
 from flask import Flask, request, jsonify
 from threading import Lock, Thread, Event
 import hazelcast
+import requests
 
 
 app = Flask(__name__)
@@ -15,7 +16,12 @@ HZ_MEMBERS = [
     if m.strip()
 ]
 HZ_CLUSTER_NAME = os.getenv("HZ_CLUSTER_NAME", "dev")
-LOG_ALL_TX = os.getenv("LOG_ALL_TX", "0") == "1"
+LOG_ALL_TX = os.getenv("LOG_ALL_TX", "1") == "1"
+
+SERVICE_NAME = os.getenv("SERVICE_NAME", "logging-service")
+CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-server:8010")
+SELF_URL = os.getenv("SELF_URL", "")
+CONFIG_REGISTER_INTERVAL_SEC = int(os.getenv("CONFIG_REGISTER_INTERVAL_SEC", "30"))
 
 _hz_lock = Lock()
 _hz_client = None
@@ -66,6 +72,19 @@ def _shutdown_hazelcast():
 
 atexit.register(_shutdown_hazelcast)
 
+def _register_loop():
+    if not SELF_URL:
+        return
+    payload = {"service": SERVICE_NAME, "url": SELF_URL}
+    while True:
+        try:
+            requests.post(f"{CONFIG_SERVER_URL}/register", json=payload, timeout=3)
+            time.sleep(CONFIG_REGISTER_INTERVAL_SEC)
+        except Exception:
+            time.sleep(1)
+
+Thread(target=_register_loop, daemon=True).start()
+
 @app.post("/transactions")
 def add_transaction():
     tx = request.get_json(force=True)
@@ -86,10 +105,13 @@ def add_transaction():
 
     _by_user_multimap.put(user_id, tx_id)
 
-    if LOG_ALL_TX or str(tx_id).startswith("msg"):
+    if LOG_ALL_TX:
         msg = tx.get("message")
         extra = f" msg={msg}" if msg is not None else ""
-        print(f"[logging-service:{INSTANCE_ID}] stored tx={tx_id} user={user_id} amount={tx['amount']}{extra}")
+        print(
+            f"[logging-service:{INSTANCE_ID}] stored tx={tx_id} user={user_id} amount={tx['amount']}{extra}",
+            flush=True,
+        )
     return jsonify({"ok": True})
 
 @app.get("/transactions/user/<user_id>")

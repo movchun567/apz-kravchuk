@@ -1,13 +1,23 @@
 import os
 import time
+import json
 from flask import Flask, request, jsonify
 from threading import Lock
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
+import threading
+from confluent_kafka import Consumer
+import requests
 
 app = Flask(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "counter-transactions")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "counter-service")
+CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-server:8010")
+SELF_URL = os.getenv("SELF_URL", "")
+CONFIG_REGISTER_INTERVAL_SEC = int(os.getenv("CONFIG_REGISTER_INTERVAL_SEC", "30"))
 _pool_lock = Lock()
 _pool = None
 
@@ -39,6 +49,16 @@ def _get_pool():
                         )
                         """
                     )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS applied_transactions (
+                            transaction_id TEXT PRIMARY KEY,
+                            user_id TEXT NOT NULL,
+                            amount BIGINT NOT NULL,
+                            timestamp DOUBLE PRECISION
+                        )
+                        """
+                    )
                 conn.close()
                 _pool = ThreadedConnectionPool(1, 16, dsn=DATABASE_URL)
                 return _pool
@@ -55,6 +75,97 @@ def _with_conn(fn):
         return fn(conn)
     finally:
         pool.putconn(conn)
+
+def _apply_tx_to_db(tx):
+    user_id = tx.get("user_id")
+    tx_id = tx.get("transaction_id")
+    amount = int(tx.get("amount", 0))
+    ts = tx.get("timestamp")
+
+    if not user_id or not tx_id:
+        return False
+
+    def run(conn):
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO applied_transactions (transaction_id, user_id, amount, timestamp)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (transaction_id) DO NOTHING
+                    """,
+                    (tx_id, user_id, amount, ts),
+                )
+                if cur.rowcount == 0:
+                    return False
+                cur.execute(
+                    """
+                    INSERT INTO balances (user_id, balance)
+                    VALUES (%s, %s)
+                    ON CONFLICT (user_id)
+                    DO UPDATE SET balance = balances.balance + EXCLUDED.balance
+                    """,
+                    (user_id, amount),
+                )
+                return True
+
+    return _with_conn(run)
+
+def _kafka_consume_loop():
+    _get_pool()
+
+    c = Consumer(
+        {
+            "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
+            "group.id": "counter-service",
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
+        }
+    )
+    c.subscribe([KAFKA_TOPIC])
+    print(f"[counter-service] consuming from kafka topic={KAFKA_TOPIC} bootstrap={KAFKA_BOOTSTRAP_SERVERS}")
+
+    try:
+        while True:
+            msg = c.poll(1.0)
+            if msg is None:
+                continue
+            if msg.error():
+                continue
+
+            try:
+                tx = json.loads(msg.value().decode("utf-8"))
+                applied = _apply_tx_to_db(tx)
+                c.commit(message=msg, asynchronous=False)
+                if applied and str(tx.get("transaction_id", "")).startswith("msg"):
+                    print(f"[counter-service] applied tx={tx.get('transaction_id')} user={tx.get('user_id')} amount={tx.get('amount')}")
+            except Exception as e:
+                print(f"[counter-service] error processing msg: {e}")
+                time.sleep(0.2)
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+def _start_consumer_once():
+    t = threading.Thread(target=_kafka_consume_loop, daemon=True)
+    t.start()
+
+_start_consumer_once()
+
+def _register_loop():
+    if not SELF_URL:
+        return
+    payload = {"service": SERVICE_NAME, "url": SELF_URL}
+    while True:
+        try:
+            requests.post(f"{CONFIG_SERVER_URL}/register", json=payload, timeout=3)
+            time.sleep(CONFIG_REGISTER_INTERVAL_SEC)
+        except Exception:
+            time.sleep(1)
+
+threading.Thread(target=_register_loop, daemon=True).start()
 
 @app.post("/transactions")
 def apply_transaction():
