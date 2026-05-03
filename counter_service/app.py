@@ -18,6 +18,8 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "counter-service")
 CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-server:8010")
 SELF_URL = os.getenv("SELF_URL", "")
 CONFIG_REGISTER_INTERVAL_SEC = int(os.getenv("CONFIG_REGISTER_INTERVAL_SEC", "30"))
+KAFKA_COMMIT_EVERY_N = int(os.getenv("KAFKA_COMMIT_EVERY_N", "200"))
+KAFKA_COMMIT_EVERY_SEC = float(os.getenv("KAFKA_COMMIT_EVERY_SEC", "2.0"))
 _pool_lock = Lock()
 _pool = None
 
@@ -123,12 +125,26 @@ def _kafka_consume_loop():
         }
     )
     c.subscribe([KAFKA_TOPIC])
-    print(f"[counter-service] consuming from kafka topic={KAFKA_TOPIC} bootstrap={KAFKA_BOOTSTRAP_SERVERS}")
+    print(
+        f"[counter-service] consuming from kafka topic={KAFKA_TOPIC} bootstrap={KAFKA_BOOTSTRAP_SERVERS}",
+        flush=True,
+    )
+
+    processed_since_commit = 0
+    last_commit_t = time.monotonic()
 
     try:
         while True:
             msg = c.poll(1.0)
             if msg is None:
+                # periodic commit even when idle (best-effort)
+                if processed_since_commit and (time.monotonic() - last_commit_t) >= KAFKA_COMMIT_EVERY_SEC:
+                    try:
+                        c.commit(asynchronous=True)
+                    except Exception:
+                        pass
+                    processed_since_commit = 0
+                    last_commit_t = time.monotonic()
                 continue
             if msg.error():
                 continue
@@ -136,14 +152,26 @@ def _kafka_consume_loop():
             try:
                 tx = json.loads(msg.value().decode("utf-8"))
                 applied = _apply_tx_to_db(tx)
-                c.commit(message=msg, asynchronous=False)
+                processed_since_commit += 1
+                now = time.monotonic()
+                if processed_since_commit >= KAFKA_COMMIT_EVERY_N or (now - last_commit_t) >= KAFKA_COMMIT_EVERY_SEC:
+                    c.commit(asynchronous=True)
+                    processed_since_commit = 0
+                    last_commit_t = now
                 if applied and str(tx.get("transaction_id", "")).startswith("msg"):
-                    print(f"[counter-service] applied tx={tx.get('transaction_id')} user={tx.get('user_id')} amount={tx.get('amount')}")
+                    print(
+                        f"[counter-service] applied tx={tx.get('transaction_id')} user={tx.get('user_id')} amount={tx.get('amount')}",
+                        flush=True,
+                    )
             except Exception as e:
-                print(f"[counter-service] error processing msg: {e}")
+                print(f"[counter-service] error processing msg: {e}", flush=True)
                 time.sleep(0.2)
     finally:
         try:
+            try:
+                c.commit(asynchronous=False)
+            except Exception:
+                pass
             c.close()
         except Exception:
             pass

@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - configmap-app.yaml
+  - rbac-facade.yaml
+  - hazelcast.yaml
+  - postgres.yaml
+  - kafka.yaml
+  - logging-service.yaml
+  - counter-service.yaml
+  - facade-service.yaml

@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hazelcast-config
+  namespace: apz-task5
+data:
+  hazelcast-docker.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <hazelcast xmlns="http://www.hazelcast.com/schema/config"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="http://www.hazelcast.com/schema/config
+                                   http://www.hazelcast.com/schema/config/hazelcast-config-5.3.xsd">
+      <cluster-name>dev</cluster-name>
+
+      <network>
+        <port port-count="1">5701</port>
+        <join>
+          <multicast enabled="false"/>
+          <tcp-ip enabled="true">
+            <member>hazelcast-0.hazelcast</member>
+            <member>hazelcast-1.hazelcast</member>
+            <member>hazelcast-2.hazelcast</member>
+          </tcp-ip>
+        </join>
+      </network>
+    </hazelcast>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hazelcast
+  namespace: apz-task5
+spec:
+  clusterIP: None
+  selector:
+    app: hazelcast
+  ports:
+    - name: hazelcast
+      port: 5701
+      targetPort: 5701
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hazelcast
+  namespace: apz-task5
+spec:
+  serviceName: hazelcast
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hazelcast
+  template:
+    metadata:
+      labels:
+        app: hazelcast
+    spec:
+      containers:
+        - name: hazelcast
+          image: hazelcast/hazelcast:5.3
+          ports:
+            - containerPort: 5701
+              name: hazelcast
+          env:
+            - name: HZ_CLUSTERNAME
+              value: dev
+          volumeMounts:
+            - name: hazelcast-config
+              mountPath: /opt/hazelcast/config/hazelcast-docker.xml
+              subPath: hazelcast-docker.xml
+      volumes:
+        - name: hazelcast-config
+          configMap:
+            name: hazelcast-config

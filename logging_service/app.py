@@ -17,6 +17,7 @@ HZ_MEMBERS = [
 ]
 HZ_CLUSTER_NAME = os.getenv("HZ_CLUSTER_NAME", "dev")
 LOG_ALL_TX = os.getenv("LOG_ALL_TX", "1") == "1"
+USER_QUERY_SCAN_FALLBACK = os.getenv("USER_QUERY_SCAN_FALLBACK", "1") == "1"
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "logging-service")
 CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-server:8010")
@@ -120,11 +121,24 @@ def get_user_transactions(user_id):
     if not ok:
         return jsonify({"error": "hazelcast not ready", "details": err}), 503
     ids = _by_user_multimap.get(user_id) or []
-    txs = []
+    by_id = {}
     for tx_id in ids:
         tx = _tx_map.get(tx_id)
         if tx is not None:
-            txs.append(tx)
+            by_id[tx.get("transaction_id", tx_id)] = tx
+
+    if USER_QUERY_SCAN_FALLBACK:
+        try:
+            for tx in list(_tx_map.values()):
+                if isinstance(tx, dict) and str(tx.get("user_id", "")) == str(user_id):
+                    tid = tx.get("transaction_id")
+                    if tid and tid not in by_id:
+                        by_id[tid] = tx
+        except Exception:
+            pass
+
+    txs = list(by_id.values())
+    txs.sort(key=lambda t: (t.get("timestamp", 0), str(t.get("transaction_id", ""))))
     return jsonify({"transactions": txs})
 
 @app.get("/transactions")

@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: apz-task5
+spec:
+  selector:
+    app: kafka
+  ports:
+    - name: kafka
+      port: 29092
+      targetPort: 29092
+    - name: controller
+      port: 29093
+      targetPort: 29093
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+  namespace: apz-task5
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:3.9.0
+          ports:
+            - containerPort: 29092
+              name: kafka
+            - containerPort: 29093
+              name: controller
+          env:
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://:29092,CONTROLLER://:29093"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka:29092"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@kafka:29093"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"

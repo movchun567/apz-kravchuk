@@ -29,6 +29,9 @@ CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-server:8010")
 SELF_URL = os.getenv("SELF_URL", "")
 CONFIG_REGISTER_INTERVAL_SEC = int(os.getenv("CONFIG_REGISTER_INTERVAL_SEC", "30"))
 
+K8S_DISCOVERY = os.getenv("K8S_DISCOVERY", "1") == "1" and bool(os.getenv("KUBERNETES_SERVICE_HOST"))
+POD_NAMESPACE = os.getenv("POD_NAMESPACE", "default")
+
 metrics = {
     "logging_calls": 0,
     "counter_calls": 0,
@@ -47,12 +50,59 @@ _svc_cache_lock = Lock()
 _svc_cache = {}
 _SVC_CACHE_TTL_SEC = 2.0
 
+def _k8s_read_token():
+    try:
+        with open("/var/run/secrets/kubernetes.io/serviceaccount/token", "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+def _k8s_endpoints(service_name):
+    token = _k8s_read_token()
+    if not token:
+        return []
+
+    api = f"https://kubernetes.default.svc/api/v1/namespaces/{POD_NAMESPACE}/endpoints/{service_name}"
+    try:
+        r = requests.get(
+            api,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=2,
+            verify="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+        )
+        if not r.ok:
+            return []
+        data = r.json() or {}
+    except Exception:
+        return []
+
+    urls = []
+    for subset in data.get("subsets") or []:
+        ports = subset.get("ports") or []
+        addrs = subset.get("addresses") or []
+        for addr in addrs:
+            ip = addr.get("ip")
+            if not ip:
+                continue
+            for p in ports:
+                port = p.get("port")
+                if port:
+                    urls.append(f"http://{ip}:{int(port)}")
+    return urls
+
 def _get_service_urls(service_name, fallback_urls):
     tnow = time.time()
     with _svc_cache_lock:
         cached = _svc_cache.get(service_name)
         if cached and (tnow - cached["ts"] < _SVC_CACHE_TTL_SEC):
             return list(cached["urls"])
+
+    if K8S_DISCOVERY:
+        urls = _k8s_endpoints(service_name)
+        if urls:
+            with _svc_cache_lock:
+                _svc_cache[service_name] = {"ts": tnow, "urls": list(urls)}
+            return list(urls)
 
     try:
         r = requests.get(f"{CONFIG_SERVER_URL}/services/{service_name}", timeout=2)
@@ -243,6 +293,10 @@ def reset_metrics():
         metrics["counter_time_sec"] = 0.0
         metrics["kafka_calls"] = 0
         metrics["kafka_time_sec"] = 0.0
+    return jsonify({"ok": True})
+
+@app.get("/health")
+def health():
     return jsonify({"ok": True})
 
 if __name__ == "__main__":
